@@ -20,6 +20,8 @@ dns_domain="${dns_domain:-sms}"
 dns_servers="${dns_servers:-192.168.72.1}"
 
 
+
+
 # Internal ethernet interface on SMS
 sms_eth_internal="${sms_eth_internal:-ens2f0}"
 
@@ -51,6 +53,10 @@ epel_repo_remote_dir="${epel_repo_remote_dir:-/confluent-public/epel}"
 
 # Provisioning interface used by compute hosts (Warewulf recipe only)
 eth_provision="${eth_provision:-eth0}"
+
+#
+
+
 
 # Flags for optional installation/configuration
 enable_ib="${enable_ib:-0}"

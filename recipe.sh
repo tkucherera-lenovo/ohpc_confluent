@@ -12,6 +12,10 @@
 #  corresponding sections from the companion install guide.
 # -----------------------------------------------------------------------------------------
 
+# Assumptions 
+# DNS is set up and working for compute nodes 
+# compute node bmc are already set up no discovery needed
+
 #inputFile=${OHPC_INPUT_LOCAL:-/opt/ohpc/pub/doc/recipes/centos8/input.local}
 inputFile=${OHPC_INPUT_LOCAL:-./input.local}
 if [ ! -e ${inputFile} ];then
@@ -26,7 +30,7 @@ fi
 # execution on the master SMS host.
 # -----------------------------------------------------------------------------------------
 
-# Disable firewall
+## Disable firewall
 systemctl disable firewalld
 systemctl stop firewalld
 
@@ -45,6 +49,7 @@ systemctl enable confluent --now
 systemctl enable httpd --now
 systemctl enable tftp.socket --now
 
+
 # ------------------------------------------------
 # ADD confluent bin to path
 # ------------------------------------------------
@@ -54,6 +59,23 @@ PATH="$PATH:/opt/confluent/bin"
 # Initialize OS images for use with confluent (Section 3.4.1)
 # ------------------------------------------------------
 # generate an ssh key before running this command
+sshkeys=$(ls ~/.ssh | wc -l)
+if [[ $sshkeys -eq 0 ]]; then
+     ssh-keygen -f ~/.ssh/id_ed25519 -t ed25519 -N ''
+fi
+
+
+# check if selinux is enabled before
+# check to see if httpd can connect to network
+selinux_state=$(getenforce)
+if [[ $selinux_state == 'Enforcing' ]]; then
+     httpd_can_connect_network=$(getsebool httpd_can_network_connect | cut -d " " -f 3 )
+     if [[ $httpd_can_connect_network == 'off' ]]; then
+     echo "httpd_can_network_connect is set to off set it to on by running: setsebool -P httpd_can_network_connect=on"
+     exit 1
+     fi
+fi
+
 osdeploy initialize -$initialize_options
 osdeploy import  ${iso_path}/Rocky-9.4-x86_64-dvd.iso
 
@@ -63,16 +85,12 @@ nodegroupattrib everything deployment.useinsecureprotocols=${deployment_protocol
 # create compute nodegroup
 nodegroupdefine compute
 
-
-# Add hosts to cluster (Section 3.5)
+# Add hosts to cluster (Section 3.5) Assumed bmc is preconfigured
 for ((i=0; i<$num_computes; i++)) ; do
    nodedefine ${c_name[$i]} groups=everything,compute hardwaremanagement.manager=${c_bmc[$i]} secret.hardwaremanagementuser=$bmc_username secret.hardwaremanagementpassword=$bmc_password
-   nodediscover assign -n ${c_name[$i]} -e ${c_bmac[$i]}  # this command works best with Lenovo systems but we can do without it. 
 done
 # Set default root password
 #chtab key=system passwd.username=root passwd.password=`openssl rand -base64 12`
-
-
 
 # Setup IPoIB networking
 if [[ ${enable_ipoib} -eq 1 ]];then
@@ -83,22 +101,8 @@ if [[ ${enable_ipoib} -eq 1 ]];then
      done
 fi
 
-# Complete networking setup, Preparing name resolution
-for ((i=0; i<$num_computes; i++)); do
-     echo "${c_ip[$i]} ${c_name[$i]} ${c_name[$i]}.$dns_domain" >> /etc/hosts
-done
-
-
-# ----------------------------------------------------------------
-# Have to make sure that name resolution is working 
-# if name resolution is not working the deployment will not work
-# -----------------------------------------------------------------
-##dnf -y install dnsmasq
-##systemctl enable dnsmasq --now
-
 # Initiate os deployment over network to compute nodes
 nodedeploy -n compute rocky-9.4-x86_64-default
-# Need to have a way to wait for deployment to finish before proceeding
 
 while true; do
     deployment_pending=false
@@ -113,8 +117,7 @@ while true; do
      then
           echo "deployment still pending"
           deployment_pending=false
-          sleep 20
-          # look into finding out how long we have been waiting for os deployment to finish (maybe add a timeout)
+          sleep 30
      else
           break
      fi
@@ -177,6 +180,22 @@ if [[ ${enable_opensm} -eq 1 ]];then
      systemctl start opensm
 fi
 
+# -----------------------------------------------------------------------
+# Optionally add InfiniBand support services on master node (Section 4.5)
+# -----------------------------------------------------------------------
+if [[ ${enable_ib} -eq 1 ]];then
+     dnf -y groupinstall "InfiniBand Support"
+     udevadm trigger --type=devices --action=add
+     systemctl restart rdma-load-modules@infiniband.service
+fi
+
+# Optionally enable opensm subnet manager
+if [[ ${enable_opensm} -eq 1 ]];then
+     dnf -y install opensm
+     systemctl enable opensm
+     systemctl start opensm
+fi
+
 # Optionally enable IPoIB interface on SMS
 if [[ ${enable_ipoib} -eq 1 ]];then
      # Enable ib0
@@ -207,12 +226,13 @@ fi
 # --------------------------------------------------------------------
 nodeshell compute dnf --setopt=\*.skip_if_unavailable=1 -y install dnf-plugins-core perl
 nodeshell compute dnf config-manager --enable crb
-nodeshell compute dnf config-manager --add-repo=http://$sms_ip/$ohpc_repo_remote_dir/OpenHPC.local.repo
+
 nodeshell compute "perl -pi -e 's/file:\/\/\@PATH\@/http:\/\/$sms_ip\/"${ohpc_repo_remote_dir//\//"\/"}"/s' /etc/yum.repos.d/OpenHPC.local.repo"
 
 # ---------------------------------
 # Configure access to EPEL packages
 # ---------------------------------
+
 mkdir -p $epel_repo_dir
 dnf -y install dnf-plugins-core createrepo
 dnf download --destdir $epel_repo_dir fping libconfuse libunwind
@@ -230,7 +250,7 @@ nodeshell compute dnf -y install ohpc-slurm-client
 nodeshell compute dnf -y install ntp
 nodeshell compute dnf -y install kernel
 nodeshell compute dnf -y install  --enablerepo=powertools lmod-ohpc
-
+nodeshell compute dnf config-manager --add-repo=http://$sms_ip/$ohpc_repo_remote_dir/OpenHPC.local.repo
 # ----------------------------------------------
 # Customize system configuration (Section 4.6.2)
 # ----------------------------------------------
@@ -265,7 +285,6 @@ nodeshell compute perl -pi -e "'s/# End of file/\* hard memlock unlimited\n$&/s'
 nodeshell compute echo "\""account required pam_slurm.so"\"" \>\> /etc/pam.d/sshd
 
 # Enable Optional packages
-
 if [[ ${enable_lustre_client} -eq 1 ]];then
      # Install Lustre client on master
      dnf -y install lustre-client-ohpc
@@ -420,5 +439,3 @@ useradd -m test
 #echo "/etc/shadow -> /etc/shadow" >> syncusers
 #xdcp compute -F syncusers
 nodersync /etc/passwd /etc/group /etc/shadow compute:/etc/
-
-
